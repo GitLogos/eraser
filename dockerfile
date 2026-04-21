@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.7
 
 # ---------- Build stage ----------
-FROM golang:1.22-alpine AS builder
+FROM golang:1.23-alpine AS builder
+ENV GOTOOLCHAIN=auto
 
 # build-base provides gcc/musl-dev for CGO (needed if go-sqlite3 is used).
 # Remove these two lines + set CGO_ENABLED=0 if the project uses a pure-Go
