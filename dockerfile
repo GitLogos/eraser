@@ -50,4 +50,4 @@ VOLUME ["/home/eraser/.eraser"]
 EXPOSE 8080
 
 ENTRYPOINT ["eraser"]
-CMD ["serve", "-p", "8080"]
+CMD ["serve", "--port", "8080"]
