@@ -4,9 +4,7 @@
 FROM golang:1.23-alpine AS builder
 ENV GOTOOLCHAIN=auto
 
-# build-base provides gcc/musl-dev for CGO (needed if go-sqlite3 is used).
-# Remove these two lines + set CGO_ENABLED=0 if the project uses a pure-Go
-# SQLite driver (e.g. modernc.org/sqlite).
+# build-base provides gcc/musl-dev for CGO (needed for go-sqlite3)
 RUN apk add --no-cache build-base git ca-certificates
 
 WORKDIR /src
@@ -18,8 +16,8 @@ RUN go mod download
 # Copy source
 COPY . .
 
-# Build a small, stripped static binary.
-# CGO_ENABLED=1 links against musl (Alpine-compatible).
+# Build a small, stripped static binary
+# CGO_ENABLED=1 links against musl (Alpine-compatible)
 ENV CGO_ENABLED=1 \
     GOOS=linux
 
@@ -28,26 +26,37 @@ RUN go build -trimpath -ldflags="-s -w" -o /out/eraser ./cmd/eraser
 # ---------- Runtime stage ----------
 FROM alpine:3.20
 
-# ca-certificates: TLS for SMTP
-# tzdata: accurate timestamps in history
-# sqlite-libs: runtime libs if go-sqlite3 (CGO) is used; harmless otherwise
-RUN apk add --no-cache ca-certificates tzdata sqlite-libs \
+# ca-certificates: TLS for SMTP/HTTPS
+# tzdata: accurate timestamps in logs/history
+# sqlite-libs: runtime deps for CGO sqlite3 driver
+# shadow: provides `su` for privilege dropping in entrypoint
+RUN apk add --no-cache ca-certificates tzdata sqlite-libs shadow \
     && addgroup -S eraser && adduser -S -G eraser -h /home/eraser eraser
 
 WORKDIR /home/eraser
-USER eraser
 
-# Binary
+# Copy entrypoint script (runs as root initially to fix permissions)
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Copy binary from builder
 COPY --from=builder /out/eraser /usr/local/bin/eraser
 
-# Bundled broker database & example config come along with the source tree
+# Copy bundled data files with correct ownership
 COPY --from=builder --chown=eraser:eraser /src/data /home/eraser/data
 COPY --from=builder --chown=eraser:eraser /src/config.example.yaml /home/eraser/config.example.yaml
 
-# Config and SQLite DB live under ~/.eraser — mount a volume here to persist
+# Declare volume for persistent config + SQLite DB
 VOLUME ["/home/eraser/.eraser"]
+
+# Entrypoint handles init + privilege dropping; CMD provides default args
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["serve", "--port", "8080"]
+
+# Note: USER is NOT set here — entrypoint script handles privilege dropping
+# This allows the script to chown the volume before switching to eraser user
 
 EXPOSE 8080
 
-ENTRYPOINT ["eraser"]
-CMD ["serve", "--port", "8080"]
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+  CMD wget --quiet --spider http://localhost:8080/health || exit 1
