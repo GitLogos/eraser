@@ -1,0 +1,13 @@
+.git
+.github
+*.md
+!README.md
+Dockerfile
+.dockerignore
+.gitignore
+.vscode
+.idea
+*.log
+*.db
+config.yaml
+.eraser/
