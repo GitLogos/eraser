@@ -29,8 +29,8 @@ FROM alpine:3.20
 # ca-certificates: TLS for SMTP/HTTPS
 # tzdata: accurate timestamps in logs/history
 # sqlite-libs: runtime deps for CGO sqlite3 driver
-# shadow: provides `su` for privilege dropping in entrypoint
-RUN apk add --no-cache ca-certificates tzdata sqlite-libs shadow \
+# su-exec: minimal privilege-dropping tool (replaces su/gosu)
+RUN apk add --no-cache ca-certificates tzdata sqlite-libs su-exec \
     && addgroup -S eraser && adduser -S -G eraser -h /home/eraser eraser
 
 WORKDIR /home/eraser
@@ -54,7 +54,7 @@ ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["serve", "--port", "8080"]
 
 # Note: USER is NOT set here — entrypoint script handles privilege dropping
-# This allows the script to chown the volume before switching to eraser user
+# via su-exec, which is why root is required at container start
 
 EXPOSE 8080
 
