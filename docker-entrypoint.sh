@@ -11,7 +11,7 @@ mkdir -p "$DATA_DIR"
 chown -R eraser:eraser "$DATA_DIR"
 
 # Drop privileges and exec the application
-# - exec replaces PID 1 with the Go binary (proper SIGTERM/SIGINT handling)
-# - su - eraser provides a clean environment for the user
-# - "$*" preserves all arguments passed via docker-compose CMD
-exec su - eraser -c "exec eraser $*"
+# - su-exec replaces the shell with the Go binary directly
+#   (no intermediate shell = proper PID 1 SIGTERM/SIGINT handling)
+# - "$@" preserves argument quoting from the Dockerfile CMD / docker-compose
+exec su-exec eraser:eraser eraser "$@"
