@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -112,6 +113,7 @@ type Server struct {
 	templates      map[string]*template.Template
 	httpServer     *http.Server
 	port           int
+	bindHost       string // Host to bind to (from ERASER_HOST env var)
 	csrfKey        []byte
 	sessions       *SessionStore
 	rateLimiter    *RateLimiter
@@ -263,16 +265,17 @@ func (s *Server) parseTemplates() (map[string]*template.Template, error) {
 
 // Start starts the web server and opens the browser
 func (s *Server) Start() error {
-	router := s.setupRouter()
-
 	// Get bind host from environment variable, default to 127.0.0.1
-	host := os.Getenv("ERASER_HOST")
-	if host == "" {
-		host = "127.0.0.1"
+	s.bindHost = os.Getenv("ERASER_HOST")
+	if s.bindHost == "" {
+		s.bindHost = "127.0.0.1"
 	}
 
+	// Setup router after we know the bind host (needed for CSRF configuration)
+	router := s.setupRouter()
+
 	s.httpServer = &http.Server{
-		Addr:         fmt.Sprintf("%s:%d", host, s.port),
+		Addr:         fmt.Sprintf("%s:%d", s.bindHost, s.port),
 		Handler:      router,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
@@ -374,6 +377,46 @@ func (s *Server) resumePendingJob(state *PersistentJobState) {
 }
 
 // setupRouter configures all routes
+func (s *Server) buildTrustedOrigins() []string {
+	// When bound to 0.0.0.0 (Docker mode), accept all origins
+	// since CSRF origin validation is problematic with Docker networking
+	if s.bindHost == "0.0.0.0" {
+		return []string{} // Empty list means accept all origins
+	}
+
+	// For localhost-bound mode, validate origins strictly
+	origins := []string{
+		"localhost",
+		"127.0.0.1",
+		fmt.Sprintf("localhost:%d", s.port),
+		fmt.Sprintf("127.0.0.1:%d", s.port),
+	}
+
+	// Get hostname and add it as a trusted origin
+	hostname, err := os.Hostname()
+	if err == nil && hostname != "" {
+		origins = append(origins, hostname)
+		origins = append(origins, fmt.Sprintf("%s:%d", hostname, s.port))
+	}
+
+	// Get local IP addresses and add them as trusted origins
+	addrs, err := net.InterfaceAddrs()
+	if err == nil {
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok {
+				ip := ipnet.IP.String()
+				// Skip loopback IPs (already added above)
+				if !strings.HasPrefix(ip, "127.") && !strings.HasPrefix(ip, "::1") {
+					origins = append(origins, ip)
+					origins = append(origins, fmt.Sprintf("%s:%d", ip, s.port))
+				}
+			}
+		}
+	}
+
+	return origins
+}
+
 func (s *Server) setupRouter() *chi.Mux {
 	r := chi.NewRouter()
 
@@ -383,16 +426,23 @@ func (s *Server) setupRouter() *chi.Mux {
 	r.Use(middleware.Compress(5))
 	r.Use(securityHeaders)
 
-	// CSRF protection - secure for localhost only
-	csrfMiddleware := csrf.Protect(
-		s.csrfKey,
+	// CSRF protection configuration
+	trustedOrigins := s.buildTrustedOrigins()
+	csrfOpts := []csrf.Option{
 		csrf.Secure(false), // Allow HTTP for localhost
 		csrf.Path("/"),
 		csrf.HttpOnly(true),
 		csrf.SameSite(csrf.SameSiteLaxMode), // Lax mode for form submissions
 		csrf.RequestHeader("X-CSRF-Token"),  // For HTMX AJAX requests
-		csrf.TrustedOrigins([]string{"localhost", "127.0.0.1", fmt.Sprintf("localhost:%d", s.port), fmt.Sprintf("127.0.0.1:%d", s.port)}),
-	)
+	}
+
+	// Only enforce origin validation if not in 0.0.0.0 mode
+	// In 0.0.0.0 mode (Docker), buildTrustedOrigins() returns empty list (accept all origins)
+	if len(trustedOrigins) > 0 {
+		csrfOpts = append(csrfOpts, csrf.TrustedOrigins(trustedOrigins))
+	}
+
+	csrfMiddleware := csrf.Protect(s.csrfKey, csrfOpts...)
 	r.Use(csrfMiddleware)
 
 	// Static files
