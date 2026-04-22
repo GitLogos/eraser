@@ -265,8 +265,14 @@ func (s *Server) parseTemplates() (map[string]*template.Template, error) {
 func (s *Server) Start() error {
 	router := s.setupRouter()
 
+	// Get bind host from environment variable, default to 127.0.0.1
+	host := os.Getenv("ERASER_HOST")
+	if host == "" {
+		host = "127.0.0.1"
+	}
+
 	s.httpServer = &http.Server{
-		Addr:         fmt.Sprintf("127.0.0.1:%d", s.port),
+		Addr:         fmt.Sprintf("%s:%d", host, s.port),
 		Handler:      router,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,

@@ -46,6 +46,10 @@ COPY --from=builder /out/eraser /usr/local/bin/eraser
 COPY --from=builder --chown=eraser:eraser /src/data /home/eraser/data
 COPY --from=builder --chown=eraser:eraser /src/config.example.yaml /home/eraser/config.example.yaml
 
+# Bind address: use 0.0.0.0 for Docker so the web UI is accessible from outside the container
+# Can be overridden at runtime via docker-compose or docker run -e ERASER_HOST=...
+ENV ERASER_HOST=0.0.0.0
+
 # Declare volume for persistent config + SQLite DB
 VOLUME ["/home/eraser/.eraser"]
 
