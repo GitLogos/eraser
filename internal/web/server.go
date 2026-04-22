@@ -427,23 +427,23 @@ func (s *Server) setupRouter() *chi.Mux {
 	r.Use(securityHeaders)
 
 	// CSRF protection configuration
-	trustedOrigins := s.buildTrustedOrigins()
-	csrfOpts := []csrf.Option{
-		csrf.Secure(false), // Allow HTTP for localhost
-		csrf.Path("/"),
-		csrf.HttpOnly(true),
-		csrf.SameSite(csrf.SameSiteLaxMode), // Lax mode for form submissions
-		csrf.RequestHeader("X-CSRF-Token"),  // For HTMX AJAX requests
+	// In 0.0.0.0 mode (Docker), skip CSRF middleware since container networking makes origin validation problematic
+	// This is acceptable for local network deployments
+	if s.bindHost != "0.0.0.0" {
+		// Local mode: enforce CSRF with origin validation
+		trustedOrigins := s.buildTrustedOrigins()
+		csrfOpts := []csrf.Option{
+			csrf.Secure(false), // Allow HTTP for localhost
+			csrf.Path("/"),
+			csrf.HttpOnly(true),
+			csrf.SameSite(csrf.SameSiteLaxMode), // Lax mode for form submissions
+			csrf.RequestHeader("X-CSRF-Token"),  // For HTMX AJAX requests
+			csrf.TrustedOrigins(trustedOrigins),
+		}
+		csrfMiddleware := csrf.Protect(s.csrfKey, csrfOpts...)
+		r.Use(csrfMiddleware)
 	}
-
-	// Only enforce origin validation if not in 0.0.0.0 mode
-	// In 0.0.0.0 mode (Docker), buildTrustedOrigins() returns empty list (accept all origins)
-	if len(trustedOrigins) > 0 {
-		csrfOpts = append(csrfOpts, csrf.TrustedOrigins(trustedOrigins))
-	}
-
-	csrfMiddleware := csrf.Protect(s.csrfKey, csrfOpts...)
-	r.Use(csrfMiddleware)
+	// Note: CSRF is disabled in Docker 0.0.0.0 mode because container networking makes origin validation unreliable
 
 	// Static files
 	staticSub, _ := fs.Sub(staticFS, "static")
@@ -1220,10 +1220,20 @@ func (s *Server) renderPartial(w http.ResponseWriter, name string, data interfac
 	}
 }
 
+func (s *Server) getCSRFToken(r *http.Request) string {
+	// When CSRF middleware is disabled (0.0.0.0 mode), return empty string
+	// Otherwise retrieve token from middleware
+	if s.bindHost == "0.0.0.0" {
+		return "" // CSRF disabled in Docker mode
+	}
+	return csrf.Token(r)
+}
+
 func (s *Server) renderWithCSRF(w http.ResponseWriter, r *http.Request, name string, data map[string]interface{}) {
 	// Add CSRF token to data
-	data["CSRFToken"] = csrf.Token(r)
-	data["CSRFField"] = template.HTML(fmt.Sprintf(`<input type="hidden" name="gorilla.csrf.Token" value="%s">`, csrf.Token(r)))
+	csrfToken := s.getCSRFToken(r)
+	data["CSRFToken"] = csrfToken
+	data["CSRFField"] = template.HTML(fmt.Sprintf(`<input type="hidden" name="gorilla.csrf.Token" value="%s">`, csrfToken))
 
 	tmpl, ok := s.templates[name]
 	if !ok {
