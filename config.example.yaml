@@ -1,13 +1,37 @@
 # Eraser Configuration Example
 # Copy this file to ~/.eraser/config.yaml and fill in your details
 
+# -----------------------------------------------------------------------------
+# Primary profile (required)
+# -----------------------------------------------------------------------------
+# This is the default profile. Existing single-profile configs keep working
+# exactly as before — you don't need to touch `additional_profiles` if you
+# only want one identity.
 profile:
-  # Required: Your personal information for removal requests
+  # Optional: a stable ID for this profile. If omitted, "default" is used.
+  # Must be unique across all profiles.
+  id: default
+
+  # Required: personal information for removal requests
   first_name: John
   last_name: Doe
+
+  # Primary contact email (used for Reply-To on outgoing mail and backfilled
+  # into `emails:` if that list is empty).
   email: john.doe@example.com
 
-  # Optional: Additional info helps brokers locate your records
+  # Optional: extra email addresses this profile is known by. Brokers
+  # sometimes have records under aliases or old addresses — listing them all
+  # here tells the template engine to request removal for every one, and
+  # helps the inbox matcher route replies correctly.
+  #
+  # If omitted, `email:` above is used as the single address.
+  emails:
+    - john.doe@example.com
+    - john.work@example.com
+    - jdoe.old@example.com
+
+  # Optional: additional info helps brokers locate your records
   address: "123 Main Street"
   city: "San Francisco"
   state: "CA"
@@ -16,6 +40,46 @@ profile:
   phone: "+1-555-123-4567"
   date_of_birth: "1990-01-15"  # Format: YYYY-MM-DD
 
+# -----------------------------------------------------------------------------
+# Additional profiles (optional)
+# -----------------------------------------------------------------------------
+# Add family members, a spouse, or aliases here. Each profile runs its own
+# independent set of removal requests — history, pipeline state, and inbox
+# matching are all scoped per profile. Outgoing mail is ALWAYS sent from the
+# single shared SMTP account below; the per-profile email is attached as the
+# Reply-To header so broker replies land in the right mailbox.
+#
+# Uncomment and populate as many as you like.
+# additional_profiles:
+#   - id: jane                         # must be unique; defaults to slugified name
+#     first_name: Jane
+#     last_name: Doe
+#     emails:
+#       - jane@example.com
+#     address: "123 Main Street"
+#     city: "San Francisco"
+#     state: "CA"
+#     zip_code: "94102"
+#     country: "USA"
+#     phone: "+1-555-987-6543"
+#
+#   - id: teen
+#     first_name: Alex
+#     last_name: Doe
+#     emails:
+#       - alex@example.com
+#     address: "123 Main Street"
+#     city: "San Francisco"
+#     state: "CA"
+#     zip_code: "94102"
+#     country: "USA"
+
+# -----------------------------------------------------------------------------
+# Email sending (single shared account)
+# -----------------------------------------------------------------------------
+# This is the mailbox eraser authenticates to for SMTP. All outgoing mail —
+# for every profile — uses this as the envelope sender. Brokers that need a
+# reply will receive one at the per-profile email address via Reply-To.
 email:
   # Email provider: "smtp" or "sendgrid"
   provider: smtp
@@ -37,7 +101,8 @@ options:
   # Template to use: "gdpr", "ccpa", or "generic"
   template: generic
 
-  # Delay between emails in milliseconds (avoid spam filters)
+  # Delay between emails in milliseconds (avoid spam filters).
+  # Applied between every (profile, broker) send, not just within a profile.
   rate_limit_ms: 2000
 
   # Only send to brokers in these regions (optional)

@@ -4,7 +4,14 @@ I am writing to request the removal of my personal information from your databas
 
 PERSONAL IDENTIFICATION:
 - Full Name: {{.FullName}}
+{{- if gt (len .Emails) 1}}
+- Email Addresses:
+{{- range .Emails}}
+  - {{.}}
+{{- end}}
+{{- else}}
 - Email Address: {{.Email}}
+{{- end}}
 {{- if .Address}}
 - Address: {{.Address}}
 {{- end}}

@@ -14,6 +14,13 @@ type Message struct {
 	From    string
 	Subject string
 	Body    string
+	// ReplyTo, when non-empty, is emitted as a Reply-To header on the
+	// outgoing message. Used by the multi-profile send loop so that broker
+	// responses go to the profile's own mailbox even though all mail is
+	// relayed through a single From account. The envelope sender (MAIL FROM)
+	// is intentionally left as .From — many providers reject envelope
+	// spoofing.
+	ReplyTo string
 }
 
 type Result struct {
@@ -51,6 +58,11 @@ func validateMessage(msg Message) error {
 	}
 	if err := ValidateEmail(msg.To); err != nil {
 		return fmt.Errorf("invalid recipient: %w", err)
+	}
+	if msg.ReplyTo != "" {
+		if err := ValidateEmail(msg.ReplyTo); err != nil {
+			return fmt.Errorf("invalid reply-to: %w", err)
+		}
 	}
 	return nil
 }

@@ -35,6 +35,9 @@ func (s *SMTPSender) Send(ctx context.Context, msg Message) Result {
 	var message strings.Builder
 	message.WriteString(fmt.Sprintf("From: %s\r\n", msg.From))
 	message.WriteString(fmt.Sprintf("To: %s\r\n", msg.To))
+	if msg.ReplyTo != "" {
+		message.WriteString(fmt.Sprintf("Reply-To: %s\r\n", msg.ReplyTo))
+	}
 	message.WriteString(fmt.Sprintf("Subject: %s\r\n", msg.Subject))
 	message.WriteString("MIME-Version: 1.0\r\n")
 	message.WriteString("Content-Type: text/plain; charset=utf-8\r\n")

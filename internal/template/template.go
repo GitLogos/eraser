@@ -20,7 +20,8 @@ type EmailData struct {
 	FirstName   string
 	LastName    string
 	FullName    string
-	Email       string
+	Email       string   // Primary email (kept for backward compatibility with existing templates)
+	Emails      []string // All known email addresses for this profile (len >= 1 after config normalisation)
 	Address     string
 	City        string
 	State       string
@@ -84,12 +85,21 @@ func (e *Engine) Render(templateName string, profile config.Profile, b broker.Br
 		return nil, fmt.Errorf("unknown template: %s", templateName)
 	}
 
+	// Guarantee .Emails is non-empty for templates. config.Load normalises
+	// this, but renderers can be invoked directly in tests so we defensively
+	// fall back to [.Email] here.
+	emails := profile.Emails
+	if len(emails) == 0 && profile.Email != "" {
+		emails = []string{profile.Email}
+	}
+
 	now := time.Now()
 	data := EmailData{
 		FirstName:     profile.FirstName,
 		LastName:      profile.LastName,
 		FullName:      profile.FullName(),
 		Email:         profile.Email,
+		Emails:        emails,
 		Address:       profile.Address,
 		City:          profile.City,
 		State:         profile.State,

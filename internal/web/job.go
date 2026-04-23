@@ -3,10 +3,14 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/eraser-privacy/eraser/internal/history"
 
 	"github.com/google/uuid"
 )
@@ -18,8 +22,8 @@ const (
 	JobStatusRunning   JobStatus = "running"
 	JobStatusCompleted JobStatus = "completed"
 	JobStatusCancelled JobStatus = "cancelled"
-	JobStatusPaused    JobStatus = "paused"    // Paused due to daily limit
-	JobStatusError     JobStatus = "error"     // Stopped due to auth/config error
+	JobStatusPaused    JobStatus = "paused" // Paused due to daily limit
+	JobStatusError     JobStatus = "error"  // Stopped due to auth/config error
 )
 
 // Job represents a background email sending job
@@ -31,27 +35,29 @@ type Job struct {
 	Failed        int       `json:"failed"`
 	Total         int       `json:"total"`
 	CurrentBroker string    `json:"current_broker"`
+	CurrentProfile string   `json:"current_profile"` // ID of the profile currently being sent on behalf of
 	StartedAt     time.Time `json:"started_at"`
 	CompletedAt   time.Time `json:"completed_at,omitempty"`
 	Error         string    `json:"error,omitempty"`
-	ErrorType     string    `json:"error_type,omitempty"`   // "auth", "rate_limit", etc.
-	DailyLimit    int       `json:"daily_limit,omitempty"`  // Max emails per day
-	DaySent       int       `json:"day_sent,omitempty"`     // Emails sent today
+	ErrorType     string    `json:"error_type,omitempty"`  // "auth", "rate_limit", etc.
+	DailyLimit    int       `json:"daily_limit,omitempty"` // Max emails per day
+	DaySent       int       `json:"day_sent,omitempty"`    // Emails sent today
 
-	ctx              context.Context
-	cancelFunc       context.CancelFunc
-	mu               sync.Mutex
+	ctx                  context.Context
+	cancelFunc           context.CancelFunc
+	mu                   sync.Mutex
 	consecutiveAuthFails int // Track consecutive auth failures
 }
 
 // Update updates the job progress
-func (j *Job) Update(sent, failed int, currentBroker string) {
+func (j *Job) Update(sent, failed int, currentBroker, currentProfile string) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
 	j.Sent = sent
 	j.Failed = failed
 	j.CurrentBroker = currentBroker
+	j.CurrentProfile = currentProfile
 	if j.Total > 0 {
 		j.Progress = ((sent + failed) * 100) / j.Total
 	}
@@ -66,6 +72,7 @@ func (j *Job) Complete() {
 	j.CompletedAt = time.Now()
 	j.Progress = 100
 	j.CurrentBroker = ""
+	j.CurrentProfile = ""
 }
 
 // StopWithError stops the job due to an error
@@ -78,6 +85,7 @@ func (j *Job) StopWithError(errorType, errorMsg string) {
 	j.Error = errorMsg
 	j.ErrorType = errorType
 	j.CurrentBroker = ""
+	j.CurrentProfile = ""
 }
 
 // RecordAuthFailure records an auth failure and returns true if job should stop
@@ -127,19 +135,20 @@ func (j *Job) ToJSON() map[string]interface{} {
 	defer j.mu.Unlock()
 
 	return map[string]interface{}{
-		"id":             j.ID,
-		"status":         j.Status,
-		"progress":       j.Progress,
-		"sent":           j.Sent,
-		"failed":         j.Failed,
-		"total":          j.Total,
-		"current_broker": j.CurrentBroker,
-		"started_at":     j.StartedAt,
-		"completed_at":   j.CompletedAt,
-		"error":          j.Error,
-		"error_type":     j.ErrorType,
-		"daily_limit":    j.DailyLimit,
-		"day_sent":       j.DaySent,
+		"id":              j.ID,
+		"status":          j.Status,
+		"progress":        j.Progress,
+		"sent":            j.Sent,
+		"failed":          j.Failed,
+		"total":           j.Total,
+		"current_broker":  j.CurrentBroker,
+		"current_profile": j.CurrentProfile,
+		"started_at":      j.StartedAt,
+		"completed_at":    j.CompletedAt,
+		"error":           j.Error,
+		"error_type":      j.ErrorType,
+		"daily_limit":     j.DailyLimit,
+		"day_sent":        j.DaySent,
 	}
 }
 
@@ -213,20 +222,37 @@ func (jm *JobManager) Cleanup(maxAge time.Duration) {
 	}
 }
 
-// PersistentJobState represents a job that can be saved/loaded from disk
-type PersistentJobState struct {
-	ID               string    `json:"id"`
-	Status           JobStatus `json:"status"`
-	Sent             int       `json:"sent"`
-	Failed           int       `json:"failed"`
-	Total            int       `json:"total"`
-	StartedAt        time.Time `json:"started_at"`
-	RemainingBrokers []string  `json:"remaining_brokers"` // Broker IDs still to process
-	Search           string    `json:"search"`            // Original filter params
-	Category         string    `json:"category"`
-	Region           string    `json:"region"`
-	StatusFilter     string    `json:"status_filter"`
+// RemainingItem is a (profile_id, broker_id) pair in the resume queue.
+// Before multi-profile support this was a bare string (broker_id only); the
+// Load() path below handles migration of old files.
+type RemainingItem struct {
+	ProfileID string `json:"profile_id"`
+	BrokerID  string `json:"broker_id"`
 }
+
+// PersistentJobState represents a job that can be saved/loaded from disk.
+// Version 2 (this struct): RemainingItems carries (profile_id, broker_id)
+// pairs so resume knows which profile each item was queued for.
+type PersistentJobState struct {
+	Version          int             `json:"version"` // 2 = multi-profile shape; 0/missing = legacy single-profile
+	ID               string          `json:"id"`
+	Status           JobStatus       `json:"status"`
+	Sent             int             `json:"sent"`
+	Failed           int             `json:"failed"`
+	Total            int             `json:"total"`
+	StartedAt        time.Time       `json:"started_at"`
+	RemainingItems   []RemainingItem `json:"remaining_items"`
+	Search           string          `json:"search"` // Original filter params
+	Category         string          `json:"category"`
+	Region           string          `json:"region"`
+	StatusFilter     string          `json:"status_filter"`
+	ProfileIDs       []string        `json:"profile_ids"` // Which profiles this job was created for
+}
+
+// currentShapeVersion identifies the v2 multi-profile shape on disk. Bump
+// this constant if the shape changes again in the future; Load() uses it to
+// decide whether to reset or migrate.
+const currentShapeVersion = 2
 
 // JobPersistence handles saving/loading job state
 type JobPersistence struct {
@@ -248,6 +274,9 @@ func (jp *JobPersistence) Save(state *PersistentJobState) error {
 		return err
 	}
 
+	// Always stamp the current shape version on write.
+	state.Version = currentShapeVersion
+
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
@@ -256,7 +285,11 @@ func (jp *JobPersistence) Save(state *PersistentJobState) error {
 	return os.WriteFile(jp.filePath(), data, 0600)
 }
 
-// Load loads a pending job state from disk, returns nil if none exists
+// Load loads a pending job state from disk, returns nil if none exists.
+// If the file was written by an older (pre-multi-profile) version, this
+// migrates in-memory by mapping every remaining broker to DefaultProfileID.
+// The migrated state is returned but NOT auto-saved — Save() gets called
+// once processing resumes, upgrading the file naturally.
 func (jp *JobPersistence) Load() (*PersistentJobState, error) {
 	data, err := os.ReadFile(jp.filePath())
 	if os.IsNotExist(err) {
@@ -271,7 +304,57 @@ func (jp *JobPersistence) Load() (*PersistentJobState, error) {
 		return nil, err
 	}
 
-	return &state, nil
+	if state.Version == currentShapeVersion {
+		return &state, nil
+	}
+
+	// Legacy shape path: the old struct used `remaining_brokers: []string`.
+	// Unmarshal into a transitional struct to grab that field, then synthesise
+	// the (profile_id, broker_id) pairs under DefaultProfileID.
+	var legacy struct {
+		ID               string    `json:"id"`
+		Status           JobStatus `json:"status"`
+		Sent             int       `json:"sent"`
+		Failed           int       `json:"failed"`
+		Total            int       `json:"total"`
+		StartedAt        time.Time `json:"started_at"`
+		RemainingBrokers []string  `json:"remaining_brokers"`
+		Search           string    `json:"search"`
+		Category         string    `json:"category"`
+		Region           string    `json:"region"`
+		StatusFilter     string    `json:"status_filter"`
+	}
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		// If we can't even parse the legacy shape, it's irrecoverable — clear
+		// the file so the user can start fresh rather than wedge the server.
+		log.Printf("pending_job.json is unreadable (%v); clearing to recover", err)
+		_ = os.Remove(jp.filePath())
+		return nil, nil
+	}
+
+	items := make([]RemainingItem, len(legacy.RemainingBrokers))
+	for i, id := range legacy.RemainingBrokers {
+		items[i] = RemainingItem{ProfileID: history.DefaultProfileID, BrokerID: id}
+	}
+
+	log.Printf("Migrated legacy pending_job.json (v1→v%d): %d remaining items mapped to profile %q",
+		currentShapeVersion, len(items), history.DefaultProfileID)
+
+	return &PersistentJobState{
+		Version:        currentShapeVersion,
+		ID:             legacy.ID,
+		Status:         legacy.Status,
+		Sent:           legacy.Sent,
+		Failed:         legacy.Failed,
+		Total:          legacy.Total,
+		StartedAt:      legacy.StartedAt,
+		RemainingItems: items,
+		Search:         legacy.Search,
+		Category:       legacy.Category,
+		Region:         legacy.Region,
+		StatusFilter:   legacy.StatusFilter,
+		ProfileIDs:     []string{history.DefaultProfileID},
+	}, nil
 }
 
 // Clear removes the saved job state
@@ -281,4 +364,9 @@ func (jp *JobPersistence) Clear() error {
 		return nil
 	}
 	return err
+}
+
+// String returns a short description of a RemainingItem for logs.
+func (r RemainingItem) String() string {
+	return fmt.Sprintf("%s/%s", r.ProfileID, r.BrokerID)
 }
