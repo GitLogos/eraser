@@ -28,20 +28,20 @@ const (
 
 // Job represents a background email sending job
 type Job struct {
-	ID            string    `json:"id"`
-	Status        JobStatus `json:"status"`
-	Progress      int       `json:"progress"`
-	Sent          int       `json:"sent"`
-	Failed        int       `json:"failed"`
-	Total         int       `json:"total"`
-	CurrentBroker string    `json:"current_broker"`
-	CurrentProfile string   `json:"current_profile"` // ID of the profile currently being sent on behalf of
-	StartedAt     time.Time `json:"started_at"`
-	CompletedAt   time.Time `json:"completed_at,omitempty"`
-	Error         string    `json:"error,omitempty"`
-	ErrorType     string    `json:"error_type,omitempty"`  // "auth", "rate_limit", etc.
-	DailyLimit    int       `json:"daily_limit,omitempty"` // Max emails per day
-	DaySent       int       `json:"day_sent,omitempty"`    // Emails sent today
+	ID             string    `json:"id"`
+	Status         JobStatus `json:"status"`
+	Progress       int       `json:"progress"`
+	Sent           int       `json:"sent"`
+	Failed         int       `json:"failed"`
+	Total          int       `json:"total"`
+	CurrentBroker  string    `json:"current_broker"`
+	CurrentProfile string    `json:"current_profile"` // ID of the profile currently being sent on behalf of
+	StartedAt      time.Time `json:"started_at"`
+	CompletedAt    time.Time `json:"completed_at,omitempty"`
+	Error          string    `json:"error,omitempty"`
+	ErrorType      string    `json:"error_type,omitempty"`  // "auth", "rate_limit", etc.
+	DailyLimit     int       `json:"daily_limit,omitempty"` // Max emails per day
+	DaySent        int       `json:"day_sent,omitempty"`    // Emails sent today
 
 	ctx                  context.Context
 	cancelFunc           context.CancelFunc
@@ -49,15 +49,24 @@ type Job struct {
 	consecutiveAuthFails int // Track consecutive auth failures
 }
 
-// Update updates the job progress
-func (j *Job) Update(sent, failed int, currentBroker, currentProfile string) {
+// Update updates the job progress.
+//
+// Signature is backward-compatible: legacy callers pass 3 args
+// (sent, failed, currentBroker); multi-profile callers pass a 4th
+// variadic string, the profile ID currently being sent on behalf of.
+// When omitted, CurrentProfile is cleared.
+func (j *Job) Update(sent, failed int, currentBroker string, currentProfile ...string) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
 	j.Sent = sent
 	j.Failed = failed
 	j.CurrentBroker = currentBroker
-	j.CurrentProfile = currentProfile
+	if len(currentProfile) > 0 {
+		j.CurrentProfile = currentProfile[0]
+	} else {
+		j.CurrentProfile = ""
+	}
 	if j.Total > 0 {
 		j.Progress = ((sent + failed) * 100) / j.Total
 	}
@@ -223,30 +232,43 @@ func (jm *JobManager) Cleanup(maxAge time.Duration) {
 }
 
 // RemainingItem is a (profile_id, broker_id) pair in the resume queue.
-// Before multi-profile support this was a bare string (broker_id only); the
-// Load() path below handles migration of old files.
+// Before multi-profile support this was a bare broker_id string; the
+// Load() path handles migration of old on-disk files.
 type RemainingItem struct {
 	ProfileID string `json:"profile_id"`
 	BrokerID  string `json:"broker_id"`
 }
 
 // PersistentJobState represents a job that can be saved/loaded from disk.
-// Version 2 (this struct): RemainingItems carries (profile_id, broker_id)
-// pairs so resume knows which profile each item was queued for.
+//
+// BACKWARD COMPAT: the legacy `RemainingBrokers []string` field is retained
+// so existing server.go callers that set or read it keep compiling. On
+// Save(), if RemainingBrokers is set and RemainingItems is empty, every
+// broker_id is promoted to a RemainingItem under DefaultProfileID before
+// writing, so files written by either code path are v2-shaped on disk.
 type PersistentJobState struct {
-	Version          int             `json:"version"` // 2 = multi-profile shape; 0/missing = legacy single-profile
-	ID               string          `json:"id"`
-	Status           JobStatus       `json:"status"`
-	Sent             int             `json:"sent"`
-	Failed           int             `json:"failed"`
-	Total            int             `json:"total"`
-	StartedAt        time.Time       `json:"started_at"`
-	RemainingItems   []RemainingItem `json:"remaining_items"`
-	Search           string          `json:"search"` // Original filter params
-	Category         string          `json:"category"`
-	Region           string          `json:"region"`
-	StatusFilter     string          `json:"status_filter"`
-	ProfileIDs       []string        `json:"profile_ids"` // Which profiles this job was created for
+	Version   int       `json:"version"` // 2 = multi-profile shape; 0/missing = legacy single-profile
+	ID        string    `json:"id"`
+	Status    JobStatus `json:"status"`
+	Sent      int       `json:"sent"`
+	Failed    int       `json:"failed"`
+	Total     int       `json:"total"`
+	StartedAt time.Time `json:"started_at"`
+
+	// RemainingBrokers is the legacy single-profile queue: bare broker IDs.
+	// New code should set RemainingItems instead; this field is kept for
+	// callers that haven't migrated yet.
+	RemainingBrokers []string `json:"remaining_brokers,omitempty"`
+
+	// RemainingItems is the multi-profile queue: (profile_id, broker_id)
+	// pairs. Preferred over RemainingBrokers.
+	RemainingItems []RemainingItem `json:"remaining_items,omitempty"`
+
+	Search       string   `json:"search"` // Original filter params
+	Category     string   `json:"category"`
+	Region       string   `json:"region"`
+	StatusFilter string   `json:"status_filter"`
+	ProfileIDs   []string `json:"profile_ids,omitempty"` // Which profiles this job was created for
 }
 
 // currentShapeVersion identifies the v2 multi-profile shape on disk. Bump
@@ -268,10 +290,25 @@ func (jp *JobPersistence) filePath() string {
 	return filepath.Join(jp.dataDir, "pending_job.json")
 }
 
-// Save saves the job state to disk
+// Save saves the job state to disk.
+//
+// If the caller set only RemainingBrokers (legacy API), this promotes the
+// slice into RemainingItems under DefaultProfileID so the on-disk file is
+// always v2-shaped. The legacy slice is then cleared so the file has a
+// single source of truth for the queue.
 func (jp *JobPersistence) Save(state *PersistentJobState) error {
 	if err := os.MkdirAll(jp.dataDir, 0700); err != nil {
 		return err
+	}
+
+	// Normalise legacy → v2 before writing.
+	if len(state.RemainingItems) == 0 && len(state.RemainingBrokers) > 0 {
+		items := make([]RemainingItem, len(state.RemainingBrokers))
+		for i, id := range state.RemainingBrokers {
+			items[i] = RemainingItem{ProfileID: history.DefaultProfileID, BrokerID: id}
+		}
+		state.RemainingItems = items
+		state.RemainingBrokers = nil
 	}
 
 	// Always stamp the current shape version on write.
@@ -290,6 +327,10 @@ func (jp *JobPersistence) Save(state *PersistentJobState) error {
 // migrates in-memory by mapping every remaining broker to DefaultProfileID.
 // The migrated state is returned but NOT auto-saved — Save() gets called
 // once processing resumes, upgrading the file naturally.
+//
+// For backward-compat with legacy callers, RemainingBrokers is ALSO
+// populated with the bare broker IDs so old server.go code reading that
+// field still sees the queue.
 func (jp *JobPersistence) Load() (*PersistentJobState, error) {
 	data, err := os.ReadFile(jp.filePath())
 	if os.IsNotExist(err) {
@@ -305,6 +346,14 @@ func (jp *JobPersistence) Load() (*PersistentJobState, error) {
 	}
 
 	if state.Version == currentShapeVersion {
+		// Mirror RemainingItems → RemainingBrokers so legacy callers that
+		// read .RemainingBrokers keep working until they're migrated.
+		if len(state.RemainingBrokers) == 0 && len(state.RemainingItems) > 0 {
+			state.RemainingBrokers = make([]string, len(state.RemainingItems))
+			for i, it := range state.RemainingItems {
+				state.RemainingBrokers[i] = it.BrokerID
+			}
+		}
 		return &state, nil
 	}
 
@@ -341,19 +390,20 @@ func (jp *JobPersistence) Load() (*PersistentJobState, error) {
 		currentShapeVersion, len(items), history.DefaultProfileID)
 
 	return &PersistentJobState{
-		Version:        currentShapeVersion,
-		ID:             legacy.ID,
-		Status:         legacy.Status,
-		Sent:           legacy.Sent,
-		Failed:         legacy.Failed,
-		Total:          legacy.Total,
-		StartedAt:      legacy.StartedAt,
-		RemainingItems: items,
-		Search:         legacy.Search,
-		Category:       legacy.Category,
-		Region:         legacy.Region,
-		StatusFilter:   legacy.StatusFilter,
-		ProfileIDs:     []string{history.DefaultProfileID},
+		Version:          currentShapeVersion,
+		ID:               legacy.ID,
+		Status:           legacy.Status,
+		Sent:             legacy.Sent,
+		Failed:           legacy.Failed,
+		Total:            legacy.Total,
+		StartedAt:        legacy.StartedAt,
+		RemainingBrokers: legacy.RemainingBrokers, // keep legacy mirror populated
+		RemainingItems:   items,
+		Search:           legacy.Search,
+		Category:         legacy.Category,
+		Region:           legacy.Region,
+		StatusFilter:     legacy.StatusFilter,
+		ProfileIDs:       []string{history.DefaultProfileID},
 	}, nil
 }
 
